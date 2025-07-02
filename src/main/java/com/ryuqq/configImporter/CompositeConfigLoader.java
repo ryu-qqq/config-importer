@@ -1,6 +1,7 @@
 package com.ryuqq.configImporter;
 
 import java.io.InputStream;
+import java.util.Arrays;
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -9,7 +10,6 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.env.EnvironmentPostProcessor;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
-import org.springframework.core.env.Profiles;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
@@ -73,17 +73,20 @@ public class CompositeConfigLoader implements EnvironmentPostProcessor {
                 if (name == null || name.startsWith("application") || name.equals("bootstrap.yml")) continue;
 
                 List<PropertySource<?>> sources = loader.load(name, resource);
-                sources.forEach(ps -> environment.getPropertySources().addLast(ps));
-                log.info("[ConfigImporter] Loaded local yml config: {}", name);
+                for (PropertySource<?> ps : sources) {
+                    if (shouldInclude(ps, environment)) {
+                        environment.getPropertySources().addLast(ps);
+                        log.info("[ConfigImporter] Loaded local yml config: {}", ps.getName());
+                    } else {
+                        log.info("[ConfigImporter] Skipped local yml config: {} (profile mismatch)", ps.getName());
+                    }
+                }
             }
         } catch (Exception e) {
             log.warn("[ConfigImporter] Failed to load local yml configs: {}", e.getMessage());
         }
     }
 
-    /**
-     * prod 프로파일일 경우, S3에서 설정 파일을 로딩하여 환경에 추가한다.
-     */
     private void loadS3ConfigsIfProd(ConfigurableEnvironment environment) {
         try {
             if (!isProdProfile(environment)) {
@@ -124,7 +127,14 @@ public class CompositeConfigLoader implements EnvironmentPostProcessor {
                     try (InputStream input = s3.getObject(getReq)) {
                         InputStreamResource res = new InputStreamResource(input);
                         List<PropertySource<?>> sources = loader.load("s3-" + key, res);
-                        sources.forEach(ps -> environment.getPropertySources().addLast(ps));
+                        for (PropertySource<?> ps : sources) {
+                            if (shouldInclude(ps, environment)) {
+                                environment.getPropertySources().addLast(ps);
+                                log.info("[ConfigImporter] Loaded s3 yml config: {}", ps.getName());
+                            } else {
+                                log.info("[ConfigImporter] Skipped s3 yml config: {} (profile mismatch)", ps.getName());
+                            }
+                        }
                     } catch (Exception e) {
                         log.warn("[ConfigImporter] Failed to load {}: {}", key, e.getMessage());
                     }
@@ -139,6 +149,13 @@ public class CompositeConfigLoader implements EnvironmentPostProcessor {
         }
     }
 
+    private boolean shouldInclude(PropertySource<?> ps, ConfigurableEnvironment env) {
+        Object profileKey = ps.getProperty("spring.config.activate.on-profile");
+        if (profileKey == null) return true;
+        return Arrays.stream(env.getActiveProfiles())
+            .anyMatch(p -> p.equalsIgnoreCase(profileKey.toString()));
+    }
+
     private boolean isProdProfile(ConfigurableEnvironment environment) {
         for (String profile : environment.getActiveProfiles()) {
             if (profile.contains("prod")) {
@@ -148,18 +165,10 @@ public class CompositeConfigLoader implements EnvironmentPostProcessor {
         return false;
     }
 
-
-    /**
-     * S3Client를 생성하는 인터페이스로 테스트를 위해 분리
-     */
     public interface S3ClientProvider {
         S3Client get(String region);
     }
 
-
-    /**
-     * 실제 운영에 사용할 기본 S3ClientProvider 구현체
-     */
     public static class DefaultS3ClientProvider implements S3ClientProvider {
         @Override
         public S3Client get(String region) {

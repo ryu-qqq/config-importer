@@ -49,15 +49,15 @@ class CompositeConfigLoaderTest {
         env.getSystemProperties().put("s3.keyPrefix", "mock-prefix/");
         env.getSystemProperties().put("s3.region", "ap-northeast-2");
 
-        String awsYaml = "aws:\n  accessKey: mock-access\n  secretKey: mock-secret";
-        String slackYaml = "slack:\n  webhook: https://slack.com/api/notify";
+        String awsYaml = "spring:\n  config:\n    activate:\n      on-profile: prod\naws:\n  accessKey: mock-access\n  secretKey: mock-secret";
+        String slackYaml = "spring:\n  config:\n    activate:\n      on-profile: prod\nslack:\n  webhook: https://slack.com/api/notify";
 
         S3Client mockClient = new S3Client() {
             @Override public ResponseInputStream<GetObjectResponse> getObject(GetObjectRequest request) {
                 String key = request.key();
                 String yaml = key.contains("aws") ? awsYaml : slackYaml;
                 return new ResponseInputStream<>(GetObjectResponse.builder().build(),
-                    new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8)));
+                    new ByteArrayInputStream(yaml.replace("\n", "\n").getBytes(StandardCharsets.UTF_8)));
             }
 
             @Override
@@ -82,6 +82,11 @@ class CompositeConfigLoaderTest {
     @Test
     void shouldBindToConfigurationPropertiesClass() throws Exception {
         String yaml = """
+            spring:
+              config:
+                activate:
+                  on-profile: test
+
             aws:
               accessKey: "my-access"
               secretKey: "my-secret"
@@ -93,6 +98,7 @@ class CompositeConfigLoaderTest {
         List<PropertySource<?>> sources = loader.load("test-config", resource);
 
         ConfigurableEnvironment env = new StandardEnvironment();
+        env.setActiveProfiles("test");
         sources.forEach(ps -> env.getPropertySources().addLast(ps));
 
         AwsTestProperties awsProps = Binder.get(env).bind("aws", AwsTestProperties.class).get();
