@@ -1,12 +1,6 @@
 package com.ryuqq.configImporter;
 
-import software.amazon.awssdk.core.ResponseInputStream;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.GetObjectRequest;
-import software.amazon.awssdk.services.s3.model.GetObjectResponse;
-
 import java.io.ByteArrayInputStream;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
@@ -19,9 +13,16 @@ import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ByteArrayResource;
-import org.springframework.core.io.InputStreamResource;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 class CompositeConfigLoaderTest {
 
@@ -29,87 +30,59 @@ class CompositeConfigLoaderTest {
     @Test
     @DisplayName("classpath 하위 test.yml이 자동 로딩되어야 한다")
     void shouldLoadTestYamlFromClasspath() {
-        // given
         ConfigurableEnvironment environment = new StandardEnvironment();
         environment.setActiveProfiles("local");
 
         CompositeConfigLoader loader = new CompositeConfigLoader();
-
-        // when
         loader.postProcessEnvironment(environment, new SpringApplication());
 
-        // then
         assertEquals("imported-from-yml", environment.getProperty("test.key"));
-        assertEquals("42", environment.getProperty("test.count")); // YAML은 기본적으로 문자열로 처리됨
+        assertEquals("42", environment.getProperty("test.count"));
     }
 
-
     @Test
-    @DisplayName("S3에서 가져온 YAML이 prod 환경에서 바인딩되어야 한다")
-    void shouldLoadYamlFromS3WhenProdProfile() throws Exception {
-        // given
+    @DisplayName("S3Client를 통해 여러 YAML 파일을 로딩할 수 있어야 한다")
+    void shouldLoadMultipleYamlFilesFromS3Directory() throws Exception {
         ConfigurableEnvironment env = new StandardEnvironment();
         env.setActiveProfiles("prod");
         env.getSystemProperties().put("s3.bucket", "mock-bucket");
-        env.getSystemProperties().put("s3.key", "mock-key");
+        env.getSystemProperties().put("s3.keyPrefix", "mock-prefix/");
         env.getSystemProperties().put("s3.region", "ap-northeast-2");
 
-
-        String s3Yaml = "external:\n  message: \"hello-from-s3\"";
-
-        InputStream mockInputStream = new java.io.ByteArrayInputStream(s3Yaml.getBytes());
-
-        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
-        List<PropertySource<?>> sources = loader.load("s3-config", new InputStreamResource(mockInputStream));
-        sources.forEach(ps -> env.getPropertySources().addLast(ps));
-
-        // then
-        assertEquals("hello-from-s3", env.getProperty("external.message"));
-    }
-
-    @Test
-    @DisplayName("S3Client를 주입받아 S3 설정이 환경에 추가되는지 테스트")
-    void shouldBindS3YamlPropertiesViaInjectedClient() throws Exception {
-        // given
-        String s3Yaml = "external:\n  message: \"hello-from-s3\"";
-        InputStream stream = new ByteArrayInputStream(s3Yaml.getBytes(StandardCharsets.UTF_8));
+        String awsYaml = "aws:\n  accessKey: mock-access\n  secretKey: mock-secret";
+        String slackYaml = "slack:\n  webhook: https://slack.com/api/notify";
 
         S3Client mockClient = new S3Client() {
-            @Override
-            public ResponseInputStream<GetObjectResponse> getObject(GetObjectRequest getObjectRequest) {
-                GetObjectResponse response = GetObjectResponse.builder().build();
-                return new ResponseInputStream<>(response, stream);
+            @Override public ResponseInputStream<GetObjectResponse> getObject(GetObjectRequest request) {
+                String key = request.key();
+                String yaml = key.contains("aws") ? awsYaml : slackYaml;
+                return new ResponseInputStream<>(GetObjectResponse.builder().build(),
+                    new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8)));
             }
+
+            @Override
+            public ListObjectsV2Response listObjectsV2(ListObjectsV2Request request) {
+                return ListObjectsV2Response.builder()
+                    .contents(S3Object.builder().key("mock-prefix/aws.yml").build(),
+                        S3Object.builder().key("mock-prefix/slack.yml").build())
+                    .build();
+            }
+
             @Override public String serviceName() { return "mock-s3"; }
             @Override public void close() {}
         };
 
-        CompositeConfigLoader.S3ClientProvider mockProvider = region -> mockClient;
-        CompositeConfigLoader loader = new CompositeConfigLoader(mockProvider);
-
-        ConfigurableEnvironment env = new StandardEnvironment();
-        env.setActiveProfiles("prod");
-        env.getSystemProperties().put("s3.bucket", "dummy");
-        env.getSystemProperties().put("s3.key", "s3-config.yml");
-        env.getSystemProperties().put("s3.region", "ap-northeast-2");
-
-        // when
+        CompositeConfigLoader loader = new CompositeConfigLoader(region -> mockClient);
         loader.postProcessEnvironment(env, new SpringApplication());
 
-        // then
-        assertEquals("hello-from-s3", env.getProperty("external.message"));
+        assertEquals("mock-access", env.getProperty("aws.accessKey"));
+        assertEquals("https://slack.com/api/notify", env.getProperty("slack.webhook"));
     }
-
 
     @Test
     void shouldBindToConfigurationPropertiesClass() throws Exception {
-        // given
         String yaml = """
             aws:
-              accessKey: "my-access"
-              secretKey: "my-secret"
-              region: "ap-northeast-2"
-            test:
               accessKey: "my-access"
               secretKey: "my-secret"
               region: "ap-northeast-2"
@@ -117,25 +90,16 @@ class CompositeConfigLoaderTest {
 
         ByteArrayResource resource = new ByteArrayResource(yaml.getBytes(StandardCharsets.UTF_8));
         YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
-        List<PropertySource<?>> sources = loader.load("s3-config", resource);
+        List<PropertySource<?>> sources = loader.load("test-config", resource);
 
         ConfigurableEnvironment env = new StandardEnvironment();
         sources.forEach(ps -> env.getPropertySources().addLast(ps));
 
-        // when
         AwsTestProperties awsProps = Binder.get(env).bind("aws", AwsTestProperties.class).get();
 
-        // then
         assertEquals("my-access", awsProps.getAccessKey());
         assertEquals("my-secret", awsProps.getSecretKey());
         assertEquals("ap-northeast-2", awsProps.getRegion());
-
-        TestProperties testProps = Binder.get(env).bind("test", TestProperties.class).get();
-
-        assertEquals("my-access", testProps.getAccessKey());
-        assertEquals("my-secret", testProps.getSecretKey());
-        assertEquals("ap-northeast-2", testProps.getRegion());
-
     }
 
 

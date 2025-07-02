@@ -19,6 +19,9 @@ import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * CompositeConfigLoader는 Spring Boot 애플리케이션 실행 시
@@ -52,14 +55,13 @@ public class CompositeConfigLoader implements EnvironmentPostProcessor {
         log.info("ConfigLoader Loading config...");
         loadLocalYmlConfigsIfNotProd(environment);
         loadS3ConfigsIfProd(environment);
-
     }
 
     /**
      * prod 프로파일이 아닐 경우, classpath 하위의 모든 yml 파일을 로딩하여 환경에 추가한다.
      */
     private void loadLocalYmlConfigsIfNotProd(ConfigurableEnvironment environment) {
-        if (environment.getActiveProfiles().length > 0 && environment.acceptsProfiles(Profiles.of("prod"))) return;
+        if (environment.getActiveProfiles().length > 0 && isProdProfile(environment)) return;
 
         PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
         try {
@@ -70,7 +72,7 @@ public class CompositeConfigLoader implements EnvironmentPostProcessor {
                 String name = resource.getFilename();
                 if (name == null || name.startsWith("application") || name.equals("bootstrap.yml")) continue;
 
-                List<PropertySource<?>> sources = loader.load("local-" + name, resource);
+                List<PropertySource<?>> sources = loader.load(name, resource);
                 sources.forEach(ps -> environment.getPropertySources().addLast(ps));
                 log.info("[ConfigImporter] Loaded local yml config: {}", name);
             }
@@ -84,37 +86,66 @@ public class CompositeConfigLoader implements EnvironmentPostProcessor {
      */
     private void loadS3ConfigsIfProd(ConfigurableEnvironment environment) {
         try {
-            if (!environment.acceptsProfiles(Profiles.of("prod"))) {
+            if (!isProdProfile(environment)) {
                 log.info("[ConfigImporter] Skipping S3 config (not prod profile)");
                 return;
             }
 
             String bucket = environment.getProperty("s3.bucket", "my-secure-bucket");
-            String key = environment.getProperty("s3.key", "config/aws.yml");
+            String prefix = environment.getProperty("s3.keyPrefix", "config/");
             String region = environment.getProperty("s3.region", "ap-northeast-2");
 
             try (S3Client s3 = s3ClientProvider.get(region)) {
-                GetObjectRequest req = GetObjectRequest.builder()
+                ListObjectsV2Request listReq = ListObjectsV2Request.builder()
                     .bucket(bucket)
-                    .key(key)
+                    .prefix(prefix)
                     .build();
 
-                InputStream input = s3.getObject(req);
-                InputStreamResource res = new InputStreamResource(input);
+                ListObjectsV2Response listRes = s3.listObjectsV2(listReq);
+                List<S3Object> ymlObjects = listRes.contents().stream()
+                    .filter(obj -> obj.key().endsWith(".yml"))
+                    .toList();
+
+                if (ymlObjects.isEmpty()) {
+                    log.warn("[ConfigImporter] No yml files found in s3://{}/{}", bucket, prefix);
+                    return;
+                }
 
                 YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
-                List<PropertySource<?>> sources = loader.load("s3-config", res);
-                sources.forEach(ps -> environment.getPropertySources().addLast(ps));
+                for (S3Object obj : ymlObjects) {
+                    String key = obj.key();
+                    log.info("[ConfigImporter] Loading config from s3://{}/{}", bucket, key);
 
-                log.info("ConfigLoader Loaded S3 config from s3://{}/{}", bucket, key);
+                    GetObjectRequest getReq = GetObjectRequest.builder()
+                        .bucket(bucket)
+                        .key(key)
+                        .build();
+
+                    try (InputStream input = s3.getObject(getReq)) {
+                        InputStreamResource res = new InputStreamResource(input);
+                        List<PropertySource<?>> sources = loader.load("s3-" + key, res);
+                        sources.forEach(ps -> environment.getPropertySources().addLast(ps));
+                    } catch (Exception e) {
+                        log.warn("[ConfigImporter] Failed to load {}: {}", key, e.getMessage());
+                    }
+                }
 
             } catch (Exception e) {
-                log.error("s3 load failed: {}", e.getMessage());
+                log.error("[ConfigImporter] S3 config load failed: {}", e.getMessage());
             }
 
         } catch (Exception e) {
             log.warn("ConfigLoader S3 config load failed: {}", e.getMessage());
         }
+    }
+
+    private boolean isProdProfile(ConfigurableEnvironment environment) {
+        for (String profile : environment.getActiveProfiles()) {
+            if (profile.contains("prod")) {
+                return true;
+            }
+        }
+        return false;
     }
 
 
