@@ -99,10 +99,12 @@ aws:
 ### ✅ prod 프로파일
 - AWS S3에서 설정 파일을 다운로드
 - `YamlPropertySourceLoader`를 사용해 바인딩
+-  S3에 여러 개의 YML이 존재하더라도, 현재 활성화된 Spring Profile (spring.profiles.active)에 맞는 설정(spring.config.activate.on-profile)만 필터링되어 적용
 
 ### ✅ local/dev
 - classpath의 `application.yml`, `bootstrap.yml` 제외 모든 `.yml` 자동 로딩
 - `spring.config.import` 없이 설정 자동 등록
+- 이 경우에도, YML 파일 내 spring.config.activate.on-profile 설정을 기준으로, 현재 활성화된 프로파일과 일치하는 섹션만 환경에 반영.
 
 ---
 
