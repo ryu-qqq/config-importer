@@ -1,0 +1,142 @@
+package com.ryuqq.configImporter;
+
+import java.io.InputStream;
+import java.util.List;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.env.EnvironmentPostProcessor;
+import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.Profiles;
+import org.springframework.core.env.PropertySource;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+
+/**
+ * CompositeConfigLoader는 Spring Boot 애플리케이션 실행 시
+ * {@link EnvironmentPostProcessor}로 동작하여 다음과 같은 설정 로딩 기능을 제공한다:
+ * 1. prod 환경일 경우:
+ *    - S3에서 config 파일을 다운로드하고 {@link PropertySource}로 등록한다.
+ *
+ * 2. 그 외 환경(local, dev 등):
+ *    - classpath 전체를 스캔하여 application.yml, bootstrap.yml을 제외한
+ *      모든 yml 파일을 자동으로 로딩한다.
+ *
+ * 해당 클래스는 application.yml의 spring.config.import 없이도 설정 파일을 자동 바인딩할 수 있도록 도와준다.
+ */
+
+public class CompositeConfigLoader implements EnvironmentPostProcessor {
+
+    private static final Logger log = LoggerFactory.getLogger(CompositeConfigLoader.class);
+
+    private final S3ClientProvider s3ClientProvider;
+
+    public CompositeConfigLoader() {
+        this(new DefaultS3ClientProvider());
+    }
+
+    public CompositeConfigLoader(S3ClientProvider s3ClientProvider) {
+        this.s3ClientProvider = s3ClientProvider;
+    }
+
+    @Override
+    public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
+        log.info("ConfigLoader Loading config...");
+        loadLocalYmlConfigsIfNotProd(environment);
+        loadS3ConfigsIfProd(environment);
+
+    }
+
+    /**
+     * prod 프로파일이 아닐 경우, classpath 하위의 모든 yml 파일을 로딩하여 환경에 추가한다.
+     */
+    private void loadLocalYmlConfigsIfNotProd(ConfigurableEnvironment environment) {
+        if (environment.getActiveProfiles().length > 0 && environment.acceptsProfiles(Profiles.of("prod"))) return;
+
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        try {
+            Resource[] resources = resolver.getResources("classpath*:**/*.yml");
+            YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
+
+            for (Resource resource : resources) {
+                String name = resource.getFilename();
+                if (name == null || name.startsWith("application") || name.equals("bootstrap.yml")) continue;
+
+                List<PropertySource<?>> sources = loader.load("local-" + name, resource);
+                sources.forEach(ps -> environment.getPropertySources().addLast(ps));
+                log.info("[ConfigImporter] Loaded local yml config: {}", name);
+            }
+        } catch (Exception e) {
+            log.warn("[ConfigImporter] Failed to load local yml configs: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * prod 프로파일일 경우, S3에서 설정 파일을 로딩하여 환경에 추가한다.
+     */
+    private void loadS3ConfigsIfProd(ConfigurableEnvironment environment) {
+        try {
+            if (!environment.acceptsProfiles(Profiles.of("prod"))) {
+                log.info("[ConfigImporter] Skipping S3 config (not prod profile)");
+                return;
+            }
+
+            String bucket = environment.getProperty("s3.bucket", "my-secure-bucket");
+            String key = environment.getProperty("s3.key", "config/aws.yml");
+            String region = environment.getProperty("s3.region", "ap-northeast-2");
+
+            try (S3Client s3 = s3ClientProvider.get(region)) {
+                GetObjectRequest req = GetObjectRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .build();
+
+                InputStream input = s3.getObject(req);
+                InputStreamResource res = new InputStreamResource(input);
+
+                YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
+                List<PropertySource<?>> sources = loader.load("s3-config", res);
+                sources.forEach(ps -> environment.getPropertySources().addLast(ps));
+
+                log.info("ConfigLoader Loaded S3 config from s3://{}/{}", bucket, key);
+
+            } catch (Exception e) {
+                log.error("s3 load failed: {}", e.getMessage());
+            }
+
+        } catch (Exception e) {
+            log.warn("ConfigLoader S3 config load failed: {}", e.getMessage());
+        }
+    }
+
+
+    /**
+     * S3Client를 생성하는 인터페이스로 테스트를 위해 분리
+     */
+    public interface S3ClientProvider {
+        S3Client get(String region);
+    }
+
+
+    /**
+     * 실제 운영에 사용할 기본 S3ClientProvider 구현체
+     */
+    public static class DefaultS3ClientProvider implements S3ClientProvider {
+        @Override
+        public S3Client get(String region) {
+            return S3Client.builder()
+                .region(Region.of(region))
+                .credentialsProvider(DefaultCredentialsProvider.create())
+                .build();
+        }
+    }
+
+}

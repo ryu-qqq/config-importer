@@ -1,47 +1,39 @@
 plugins {
     id 'java-library'
-    id 'io.spring.dependency-management'
+    id 'maven-publish'
+    id 'io.spring.dependency-management' version "${springDependencyManagementVersion}"
 }
 
+group = projectGroup
+version = applicationVersion
+sourceCompatibility = JavaVersion.VERSION_21
 
-allprojects {
-    group = "${projectGroup}"
-    version = "${applicationVersion}"
-    sourceCompatibility = JavaVersion.VERSION_21
-
-    repositories {
-        mavenCentral()
-        mavenLocal()
-    }
+repositories {
+    mavenCentral()
+    mavenLocal()
 }
 
-
-subprojects {
-    apply plugin: 'java-library'
-    apply plugin: 'maven-publish'
-    apply plugin: 'io.spring.dependency-management'
-
-    dependencyManagement {
-        imports {
-            mavenBom "org.springframework.boot:spring-boot-dependencies:${springBootVersion}"
-        }
-    }
-
-    dependencies {
-        implementation "org.springframework.boot:spring-boot:${springBootVersion}"
-        implementation "org.springframework.boot:spring-boot-autoconfigure:${springBootVersion}"
-        implementation "org.springframework:spring-context"
-        implementation "org.springframework:spring-core"
-
-        implementation "software.amazon.awssdk:s3:${awsSdkVersion}"
-
-        testImplementation "org.springframework.boot:spring-boot-starter-test"
-        testRuntimeOnly "org.junit.platform:junit-platform-launcher"
-    }
-
-    tasks.named('test') {
-        useJUnitPlatform()
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.boot:spring-boot-dependencies:${springBootVersion}"
     }
 }
 
+dependencies {
 
+    implementation "org.springframework.boot:spring-boot"
+    implementation "org.springframework.boot:spring-boot-autoconfigure"
+    implementation "org.springframework:spring-context"
+    implementation "org.springframework:spring-core"
+
+
+    implementation "software.amazon.awssdk:s3:${awsSdkVersion}"
+
+
+    testImplementation "org.springframework.boot:spring-boot-starter-test"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+test {
+    useJUnitPlatform()
+}

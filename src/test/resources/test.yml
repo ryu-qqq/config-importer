@@ -1,0 +1,3 @@
+test:
+  key: "imported-from-yml"
+  count: 42
