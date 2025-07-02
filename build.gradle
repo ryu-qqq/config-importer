@@ -37,3 +37,15 @@ dependencies {
 test {
     useJUnitPlatform()
 }
+
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            groupId = 'com.ryuqq'
+            artifactId = 'config-importer'
+            version = '1.0.0'
+        }
+    }
+}
